@@ -52,11 +52,11 @@ print(f"Using device: {device}")
 
 # %%
 try:
-    DRIVE_SAVE_PATH = "/kaggle/working/"
+    DRIVE_SAVE_PATH = "./working/"
     os.makedirs(DRIVE_SAVE_PATH, exist_ok=True)
 
     SAVE_PATH = os.path.join(DRIVE_SAVE_PATH, "custom_yolo_model.pth")
-    DATASET_PATH = "/kaggle/input/wild-animals-detection-yolov8"  # Fixed path
+    DATASET_PATH = "./wild-animals-detection-yolov8"  # Fixed path
 
     CHECKPOINT_DIR = os.path.join(DRIVE_SAVE_PATH, "checkpoints")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
