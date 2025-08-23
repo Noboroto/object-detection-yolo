@@ -2035,7 +2035,7 @@ val_dataset = Dataset(
 
 val_loader = DataLoader(
     val_dataset,
-    batch_size=32,      
+    batch_size=8,      
     num_workers=2,
     pin_memory=True,
     collate_fn=Dataset.collate_fn
@@ -2061,78 +2061,424 @@ print(f"Index identifier (which score belongs to which image): {batch[1]['idx'].
 
 # %%
 import torch
+def box_decode_normalize(anchor_points, stride_tensor, pred_dist):
+    b, a, c = pred_dist.shape
+    pred_dist = pred_dist.reshape(b, a, 4, c // 4)
+    pred_dist = pred_dist.softmax(3)
+    
+    # Ensure all tensors on the same device
+    device = pred_dist.device
+    anchor_points = anchor_points.to(device)
+    project = torch.arange(16, dtype=torch.float, device=device).type(pred_dist.dtype)
+    
+    pred_dist = pred_dist.matmul(project)
+    lt, rb = pred_dist.chunk(2, -1)
+    x1y1 = anchor_points - lt
+    x2y2 = anchor_points + rb
+    
+    return torch.cat((x1y1, x2y2), dim=-1)*stride_tensor/input_size
 
-def bbox_iou_torch(box1, box2):
+# def bbox_iou_torch(box1, box2):
+#     """
+#     Compute IoU between two sets of boxes using PyTorch (GPU compatible)
+#     box1: (N,4) xyxy
+#     box2: (M,4) xyxy
+#     return: (N,M) IoU matrix
+#     """
+#     N = box1.shape[0]
+#     M = box2.shape[0]
+
+#     inter_x1 = torch.max(box1[:, None, 0], box2[None, :, 0])
+#     inter_y1 = torch.max(box1[:, None, 1], box2[None, :, 1])
+#     inter_x2 = torch.min(box1[:, None, 2], box2[None, :, 2])
+#     inter_y2 = torch.min(box1[:, None, 3], box2[None, :, 3])
+
+#     inter_w = torch.clamp(inter_x2 - inter_x1, min=0)
+#     inter_h = torch.clamp(inter_y2 - inter_y1, min=0)
+#     inter_area = inter_w * inter_h
+
+#     area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
+#     area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
+#     union = area1[:, None] + area2[None, :] - inter_area
+
+#     iou = inter_area / (union + 1e-16)
+#     return iou
+
+
+# def match_detections_torch(pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes, iou_threshold=0.5):
+#     """
+#     GPU version of TP matching
+#     """
+#     device = pred_bboxes.device
+#     num_pred = pred_bboxes.shape[0]
+#     tp = torch.zeros((num_pred,), device=device)
+
+#     if gt_bboxes.shape[0] == 0 or num_pred == 0:
+#         return tp
+
+#     sort_idx = torch.argsort(-pred_conf)
+#     pred_bboxes = pred_bboxes[sort_idx]
+#     pred_classes = pred_classes[sort_idx]
+
+#     assigned_gt = torch.zeros(gt_bboxes.shape[0], dtype=torch.bool, device=device)
+#     ious = bbox_iou_torch(pred_bboxes, gt_bboxes)
+
+#     for i in range(num_pred):
+#         cls_matches = (pred_classes[i] == gt_classes)
+#         iou_matches = ious[i] >= iou_threshold
+#         matches = cls_matches & iou_matches & (~assigned_gt)
+#         if matches.any():
+#             gt_idx = torch.argmax(ious[i] * matches.float())
+#             tp[sort_idx[i]] = 1
+#             assigned_gt[gt_idx] = True
+
+#     return tp
+
+
+# def build_tp_matrix_torch(pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes):
+#     """
+#     Trả về ma trận TP (num_preds, 10) trên GPU
+#     """
+#     device = pred_bboxes.device
+#     iou_thresholds = torch.arange(0.5, 1.0, 0.05, device=device)
+#     num_preds = pred_bboxes.shape[0]
+#     tp_matrix = torch.zeros((num_preds, len(iou_thresholds)), device=device)
+
+#     for j, thr in enumerate(iou_thresholds):
+#         tp_matrix[:, j] = match_detections_torch(
+#             pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes, iou_threshold=thr
+#         )
+
+#     return tp_matrix
+
+
+# %%
+# import torch
+
+# def bbox_iou_torch(boxes1, boxes2):
+#     """
+#     boxes1: (B, N, 4) [x1, y1, x2, y2]
+#     boxes2: (B, M, 4)
+#     return: (B, N, M)
+#     """
+#     # (B, N, 1, 4), (B, 1, M, 4) -> broadcast
+#     b1_x1, b1_y1, b1_x2, b1_y2 = boxes1[..., 0:1], boxes1[..., 1:2], boxes1[..., 2:3], boxes1[..., 3:4]
+#     b2_x1, b2_y1, b2_x2, b2_y2 = boxes2[..., 0], boxes2[..., 1], boxes2[..., 2], boxes2[..., 3]
+
+#     inter_x1 = torch.max(b1_x1, b2_x1[:, None, :])
+#     inter_y1 = torch.max(b1_y1, b2_y1[:, None, :])
+#     inter_x2 = torch.min(b1_x2, b2_x2[:, None, :])
+#     inter_y2 = torch.min(b1_y2, b2_y2[:, None, :])
+
+#     inter_w = (inter_x2 - inter_x1).clamp(min=0)
+#     inter_h = (inter_y2 - inter_y1).clamp(min=0)
+#     inter_area = inter_w * inter_h
+
+#     area1 = (b1_x2 - b1_x1) * (b1_y2 - b1_y1)
+#     area2 = (b2_x2 - b2_x1) * (b2_y2 - b2_y1)
+
+#     union = area1[:, :, None] + area2[:, None, :] - inter_area
+#     return inter_area / (union + 1e-6)
+
+
+# def build_tp_matrix_batch(pred_bboxes, pred_conf, pred_classes,
+#                           gt_bboxes, gt_classes, B=32):
+#     """
+#     Batch version, hỗ trợ input flatten (B*N, 4)
+
+#     pred_bboxes: (B*N, 4) hoặc (B, N, 4)
+#     pred_conf:   (B*N,)   hoặc (B, N)
+#     pred_classes:(B*N,)   hoặc (B, N)
+#     gt_bboxes:   (B, M, 4)
+#     gt_classes:  (B, M)
+
+#     return: tp_matrix (B*N, T) với T=10 thresholds (0.5:0.05:0.95)
+#     """
+#     device = pred_bboxes.device
+#     iou_thresholds = torch.arange(0.5, 1.0, 0.05, device=device)  # (T,)
+
+#     # Nếu input đã flatten → reshape lại
+#     if pred_bboxes.dim() == 2:   # (B*N, 4)
+#         assert B is not None, "Cần truyền số batch B nếu input flatten"
+#         N = pred_bboxes.shape[0] // B
+#         pred_bboxes = pred_bboxes.view(B, N, 4)
+#         pred_conf   = pred_conf.view(B, N)
+#         pred_classes= pred_classes.view(B, N)
+
+#     B, N, _ = pred_bboxes.shape
+#     M = gt_bboxes.shape[1]
+#     T = len(iou_thresholds)
+
+#     # Sort predictions by confidence
+#     sort_idx = torch.argsort(pred_conf, dim=1, descending=True)
+#     pred_bboxes = torch.gather(pred_bboxes, 1, sort_idx[..., None].expand(-1, -1, 4))
+#     pred_classes = torch.gather(pred_classes, 1, sort_idx)
+
+#     # IoU (B, N, M)
+#     ious = bbox_iou_torch(pred_bboxes, gt_bboxes)
+
+#     tp_matrix = torch.zeros((B, N, T), device=device)
+
+#     for b in range(B):
+#         assigned_gt = torch.zeros(M, dtype=torch.bool, device=device)
+#         for n in range(N):
+#             cls_matches = (pred_classes[b, n] == gt_classes[b])  # (M,)
+#             for t, thr in enumerate(iou_thresholds):
+#                 iou_matches = (ious[b, n] >= thr)
+#                 matches = cls_matches & iou_matches & (~assigned_gt)
+#                 if matches.any():
+#                     gt_idx = torch.argmax(ious[b, n] * matches.float())
+#                     tp_matrix[b, n, t] = 1
+#                     assigned_gt[gt_idx] = True
+
+#     # Flatten về (B*N, T)
+#     tp_matrix = tp_matrix.view(B * N, T)
+#     return tp_matrix
+
+# %%
+# import torch
+
+# def bbox_iou_torch(boxes1, boxes2):
+#     """
+#     boxes1: (B, N, 4) [x1, y1, x2, y2]
+#     boxes2: (B, M, 4)
+#     return: (B, N, M)
+#     """
+#     b1_x1, b1_y1, b1_x2, b1_y2 = boxes1[..., 0:1], boxes1[..., 1:2], boxes1[..., 2:3], boxes1[..., 3:4]
+#     b2_x1, b2_y1, b2_x2, b2_y2 = boxes2[..., 0:1], boxes2[..., 1:2], boxes2[..., 2:3], boxes2[..., 3:4]
+
+#     # (B, N, 1) vs (B, 1, M) → broadcast thành (B, N, M)
+#     inter_x1 = torch.max(b1_x1, b2_x1.transpose(1, 2))
+#     inter_y1 = torch.max(b1_y1, b2_y1.transpose(1, 2))
+#     inter_x2 = torch.min(b1_x2, b2_x2.transpose(1, 2))
+#     inter_y2 = torch.min(b1_y2, b2_y2.transpose(1, 2))
+
+#     inter_w = (inter_x2 - inter_x1).clamp(min=0)
+#     inter_h = (inter_y2 - inter_y1).clamp(min=0)
+#     inter_area = inter_w * inter_h
+
+#     area1 = (b1_x2 - b1_x1) * (b1_y2 - b1_y1)       # (B, N, 1)
+#     area2 = (b2_x2 - b2_x1) * (b2_y2 - b2_y1)       # (B, M, 1)
+
+#     union = area1 + area2.transpose(1, 2) - inter_area
+#     return inter_area / (union + 1e-6)
+
+# def pack_targets(gt_bboxes, gt_classes, gt_idx, B, pad_val=-1):
+#     """
+#     Gom ground truth về dạng (B, M, 4), (B, M)
+#     gt_bboxes: (T, 4)
+#     gt_classes: (T,)
+#     gt_idx: (T,) batch index ứng với mỗi GT
+#     B: batch size
+#     pad_val: giá trị điền vào chỗ trống (default -1)
+#     """
+#     # Số lượng box tối đa trên 1 ảnh
+#     M = gt_idx.long().bincount(minlength=B).max().item()
+
+#     # Khởi tạo tensor
+#     out_boxes = torch.full((B, M, 4), pad_val, device=gt_bboxes.device, dtype=gt_bboxes.dtype)
+#     out_classes = torch.full((B, M), pad_val, device=gt_classes.device, dtype=gt_classes.dtype)
+
+#     counter = torch.zeros(B, dtype=torch.long, device=gt_bboxes.device)
+
+#     for i in range(gt_bboxes.shape[0]):
+#         b = int(gt_idx[i])
+#         j = counter[b].item()
+#         out_boxes[b, j] = gt_bboxes[i]
+#         out_classes[b, j] = gt_classes[i]
+#         counter[b] += 1
+
+#     return out_boxes, out_classes
+
+
+# def build_tp_matrix_batch(pred_bboxes, pred_conf, pred_classes,
+#                           gt_bboxes, gt_classes, gt_idx=None, B=32):
+#     """
+#     Batch version, hỗ trợ cả input flatten (B*N, 4) và target flatten (T, 4)
+
+#     pred_bboxes: (B*N, 4) hoặc (B, N, 4)
+#     pred_conf:   (B*N,)   hoặc (B, N)
+#     pred_classes:(B*N,)   hoặc (B, N)
+#     gt_bboxes:   (B, M, 4) hoặc (T, 4)
+#     gt_classes:  (B, M)   hoặc (T,)
+#     gt_idx:      (T,) nếu gt flatten
+#     B: batch size
+
+#     return: tp_matrix (B*N, T) với T=10 thresholds (0.5:0.05:0.95)
+#     """
+#     device = pred_bboxes.device
+#     iou_thresholds = torch.arange(0.5, 1.0, 0.05, device=device)  # (T,)
+
+#     # Nếu pred flatten → reshape
+#     if pred_bboxes.dim() == 2:   # (B*N, 4)
+#         assert B is not None, "Cần truyền số batch B nếu input flatten"
+#         N = pred_bboxes.shape[0] // B
+#         pred_bboxes = pred_bboxes.view(B, N, 4)
+#         pred_conf   = pred_conf.view(B, N)
+#         pred_classes= pred_classes.view(B, N)
+
+#     B, N, _ = pred_bboxes.shape
+
+#     # Nếu gt flatten → pack về (B, M, 4), (B, M)
+#     if gt_bboxes.dim() == 2:   # (T, 4)
+#         assert gt_idx is not None, "Cần gt_idx để pack target"
+#         gt_bboxes, gt_classes = pack_targets(gt_bboxes, gt_classes, gt_idx, B)
+
+#     M = gt_bboxes.shape[1]
+#     T = len(iou_thresholds)
+
+#     # Sort predictions by confidence
+#     sort_idx = torch.argsort(pred_conf, dim=1, descending=True)
+#     pred_bboxes = torch.gather(pred_bboxes, 1, sort_idx[..., None].expand(-1, -1, 4))
+#     pred_classes = torch.gather(pred_classes, 1, sort_idx)
+
+#     # IoU (B, N, M)
+#     ious = bbox_iou_torch(pred_bboxes, gt_bboxes)
+
+#     tp_matrix = torch.zeros((B, N, T), device=device)
+
+#     for b in range(B):
+#         assigned_gt = torch.zeros(M, dtype=torch.bool, device=device)
+#         for n in range(N):
+#             cls_matches = (pred_classes[b, n] == gt_classes[b])  # (M,)
+#             for t, thr in enumerate(iou_thresholds):
+#                 iou_matches = (ious[b, n] >= thr)
+#                 matches = cls_matches & iou_matches & (~assigned_gt)
+#                 if matches.any():
+#                     gt_idx_ = torch.argmax(ious[b, n] * matches.float())
+#                     tp_matrix[b, n, t] = 1
+#                     assigned_gt[gt_idx_] = True
+
+#     # Flatten về (B*N, T)
+#     tp_matrix = tp_matrix.view(B * N, T)
+#     return tp_matrix
+
+
+# %%
+import torch
+
+def pack_targets(gt_bboxes, gt_classes, gt_idx, B, pad_val=-1):
     """
-    Compute IoU between two sets of boxes using PyTorch (GPU compatible)
-    box1: (N,4) xyxy
-    box2: (M,4) xyxy
-    return: (N,M) IoU matrix
+    Gom ground truth về dạng (B, M, 4), (B, M)
+    
+    gt_bboxes: (T, 4)
+    gt_classes: (T,)
+    gt_idx: (T,) batch index của mỗi GT
+    B: batch size
+    pad_val: giá trị điền vào chỗ trống (default -1)
     """
-    N = box1.shape[0]
-    M = box2.shape[0]
+    # Số lượng box tối đa trên 1 ảnh
+    M = gt_idx.long().bincount(minlength=B).max().item()
 
-    inter_x1 = torch.max(box1[:, None, 0], box2[None, :, 0])
-    inter_y1 = torch.max(box1[:, None, 1], box2[None, :, 1])
-    inter_x2 = torch.min(box1[:, None, 2], box2[None, :, 2])
-    inter_y2 = torch.min(box1[:, None, 3], box2[None, :, 3])
+    # Khởi tạo tensor
+    out_boxes = torch.full((B, M, 4), pad_val, device=gt_bboxes.device, dtype=gt_bboxes.dtype)
+    out_classes = torch.full((B, M), pad_val, device=gt_classes.device, dtype=gt_classes.dtype)
 
-    inter_w = torch.clamp(inter_x2 - inter_x1, min=0)
-    inter_h = torch.clamp(inter_y2 - inter_y1, min=0)
+    counter = torch.zeros(B, dtype=torch.long, device=gt_bboxes.device)
+
+    for i in range(gt_bboxes.shape[0]):
+        b = int(gt_idx[i])
+        j = counter[b].item()
+        out_boxes[b, j] = gt_bboxes[i]
+        out_classes[b, j] = gt_classes[i]
+        counter[b] += 1
+
+    return out_boxes, out_classes
+def bbox_iou_torch(boxes1, boxes2):
+    """
+    boxes1: (B, N, 4) [x1, y1, x2, y2]
+    boxes2: (B, M, 4)
+    return: (B, N, M)
+    """
+    B, N, _ = boxes1.shape
+    _, M, _ = boxes2.shape
+
+    # broadcast (B, N, 1, 4) vs (B, 1, M, 4)
+    b1 = boxes1.unsqueeze(2)  # (B, N, 1, 4)
+    b2 = boxes2.unsqueeze(1)  # (B, 1, M, 4)
+
+    inter_x1 = torch.max(b1[...,0], b2[...,0])
+    inter_y1 = torch.max(b1[...,1], b2[...,1])
+    inter_x2 = torch.min(b1[...,2], b2[...,2])
+    inter_y2 = torch.min(b1[...,3], b2[...,3])
+
+    inter_w = (inter_x2 - inter_x1).clamp(min=0)
+    inter_h = (inter_y2 - inter_y1).clamp(min=0)
     inter_area = inter_w * inter_h
 
-    area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
-    area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
-    union = area1[:, None] + area2[None, :] - inter_area
+    area1 = (boxes1[...,2]-boxes1[...,0]) * (boxes1[...,3]-boxes1[...,1])
+    area2 = (boxes2[...,2]-boxes2[...,0]) * (boxes2[...,3]-boxes2[...,1])
+    union = area1.unsqueeze(-1) + area2.unsqueeze(1) - inter_area
 
-    iou = inter_area / (union + 1e-16)
-    return iou
+    return inter_area / (union + 1e-6)
 
-
-def match_detections_torch(pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes, iou_threshold=0.5):
+def build_tp_matrix_batch_yolov8_tensor(pred_bboxes, pred_conf, pred_classes,
+                                        gt_bboxes, gt_classes, B=None):
     """
-    GPU version of TP matching
-    """
-    device = pred_bboxes.device
-    num_pred = pred_bboxes.shape[0]
-    tp = torch.zeros((num_pred,), device=device)
+    Vectorized (no Python loops over N/T) — YOLOv8-style.
 
-    if gt_bboxes.shape[0] == 0 or num_pred == 0:
-        return tp
+    Inputs:
+      pred_bboxes: (B*N, 4) or (B, N, 4)
+      pred_conf:   (B*N,)   or (B, N)
+      pred_classes:(B*N,)   or (B, N)
+      gt_bboxes:   (B, M, 4)
+      gt_classes:  (B, M)    (pad = -1 cho ô trống)
 
-    sort_idx = torch.argsort(-pred_conf)
-    pred_bboxes = pred_bboxes[sort_idx]
-    pred_classes = pred_classes[sort_idx]
-
-    assigned_gt = torch.zeros(gt_bboxes.shape[0], dtype=torch.bool, device=device)
-    ious = bbox_iou_torch(pred_bboxes, gt_bboxes)
-
-    for i in range(num_pred):
-        cls_matches = (pred_classes[i] == gt_classes)
-        iou_matches = ious[i] >= iou_threshold
-        matches = cls_matches & iou_matches & (~assigned_gt)
-        if matches.any():
-            gt_idx = torch.argmax(ious[i] * matches.float())
-            tp[sort_idx[i]] = 1
-            assigned_gt[gt_idx] = True
-
-    return tp
-
-
-def build_tp_matrix_torch(pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes):
-    """
-    Trả về ma trận TP (num_preds, 10) trên GPU
+    Returns:
+      tp_matrix: (B*N, T) với T=10 (IoU 0.50:0.05:0.95)
     """
     device = pred_bboxes.device
-    iou_thresholds = torch.arange(0.5, 1.0, 0.05, device=device)
-    num_preds = pred_bboxes.shape[0]
-    tp_matrix = torch.zeros((num_preds, len(iou_thresholds)), device=device)
+    iou_thresholds = torch.arange(0.5, 1.0, 0.05, device=device)  # (T,)
+    T = iou_thresholds.numel()
 
-    for j, thr in enumerate(iou_thresholds):
-        tp_matrix[:, j] = match_detections_torch(
-            pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes, iou_threshold=thr
-        )
+    # ---- Chuẩn hoá shape ----
+    if pred_bboxes.dim() == 2:  # (B*N, 4)
+        assert B is not None, "Cần truyền B khi pred đã flatten"
+        N = pred_bboxes.shape[0] // B
+        pred_bboxes = pred_bboxes.view(B, N, 4)
+        pred_conf   = pred_conf.view(B, N)
+        pred_classes= pred_classes.view(B, N)
+    else:
+        B, N, _ = pred_bboxes.shape
 
+    _, M, _ = gt_bboxes.shape
+
+    # ---- Sort theo confidence (desc) ----
+    sort_idx = torch.argsort(pred_conf, dim=1, descending=True)                # (B, N)
+    pred_bboxes = torch.gather(pred_bboxes, 1, sort_idx[..., None].expand(-1, -1, 4))
+    pred_conf   = torch.gather(pred_conf,   1, sort_idx)
+    pred_classes= torch.gather(pred_classes,1, sort_idx)
+
+    # ---- Tính IoU: (B, N, M) ----
+    ious = bbox_iou_torch(pred_bboxes, gt_bboxes)                              # (B, N, M)
+
+    # ---- Mask GT hợp lệ (nếu có padding -1) ----
+    gt_valid = (gt_classes != -1)                                              # (B, M)
+    if gt_valid.any():
+        # Expand sang (B, 1, M) rồi (B, N, M) khi broadcast
+        ious = ious * gt_valid.unsqueeze(1)                                    # zero-out cột GT rỗng
+
+    # ---- Match theo lớp (B, N, M) ----
+    cls_match = (pred_classes.unsqueeze(-1) == gt_classes.unsqueeze(1))        # (B, N, M)
+    if gt_valid.any():
+        cls_match = cls_match & gt_valid.unsqueeze(1)                          # tắt cột rỗng
+
+    # ---- So sánh nhiều IoU thresholds cùng lúc: (B, N, M, T) ----
+    meets_thr = ious.unsqueeze(-1) >= iou_thresholds.view(1, 1, 1, T)          # (B, N, M, T)
+    matches   = meets_thr & cls_match.unsqueeze(-1)                             # (B, N, M, T)
+
+    # ---- Cưỡng bức one-to-one: giữ True đầu tiên theo thứ tự conf cho mỗi GT, mỗi threshold
+    # Với mỗi (B, M, T), dọc theo N (đã sort), lấy True đầu tiên:
+    # Ý tưởng: cumsum theo N → chỉ phần tử True đầu tiên có cumsum==1
+    m_float   = matches.float()                                                # (B, N, M, T)
+    csum      = m_float.cumsum(dim=1)                                          # (B, N, M, T)
+    first_true= matches & (csum == 1)                                          # (B, N, M, T) — chỉ giữ True đầu tiên mỗi cột M
+
+    # ---- TP cho từng pred, từng threshold: any theo GT (M) ----
+    tp_matrix = first_true.any(dim=2).to(matches.dtype)                        # (B, N, T) -> {0,1}
+
+    # ---- Flatten về (B*N, T) để tương thích compute_ap hiện có ----
+    tp_matrix = tp_matrix.reshape(B * N, T)
     return tp_matrix
 
 
@@ -2199,6 +2545,193 @@ def compute_ap_torch(tp, conf, pred_cls, target_cls, eps=1e-16):
 
     map50, mean_ap = ap50.mean().item(), ap_mean.mean().item()
     return tp_total.cpu().numpy(), fp_total.cpu().numpy(), p_mean.mean().item(), r_mean.mean().item(), map50, mean_ap
+
+
+# %%
+def compute_ap_cpu(tp, conf, pred_cls, target_cls, eps=1e-16):
+    """
+    Compute average precision (AP) on CPU tensors using numpy for interpolation.
+    
+    Args:
+        tp: torch.Tensor, (n_preds, n_iou_thresholds)
+        conf: torch.Tensor, (n_preds,)
+        pred_cls: torch.Tensor, (n_preds,)
+        target_cls: torch.Tensor, (n_targets,)
+        eps: float, small number to avoid div by zero
+    
+    Returns:
+        tp_total: np.array, true positives per class
+        fp_total: np.array, false positives per class
+        m_pre: float, mean precision
+        m_rec: float, mean recall
+        map50: float, mAP@0.5
+        mean_ap: float, mAP@0.5:0.95
+    """
+    # Move everything to CPU
+    tp = tp.cpu().numpy()
+    conf = conf.cpu().numpy()
+    pred_cls = pred_cls.cpu().numpy()
+    target_cls = target_cls.cpu().numpy()
+
+    # Sort by confidence
+    sort_idx = np.argsort(-conf)
+    tp = tp[sort_idx]
+    pred_cls = pred_cls[sort_idx]
+    conf = conf[sort_idx]
+
+    unique_classes, nt = np.unique(target_cls, return_counts=True)
+    nc = len(unique_classes)
+    n_iou = tp.shape[1]
+
+    ap = np.zeros((nc, n_iou), dtype=np.float32)
+    p = np.zeros((nc, 1000), dtype=np.float32)
+    r = np.zeros((nc, 1000), dtype=np.float32)
+    px = np.linspace(0, 1, 1000)
+
+    for ci, c in enumerate(unique_classes):
+        #mask = pred_cls == c
+        mask = (pred_cls.squeeze() == c)
+        nl = nt[ci]  # number of labels
+        no = mask.sum()  # number of predictions
+        if no == 0 or nl == 0:
+            continue
+        print("mask:",mask.shape)
+        tp_class = tp[mask, :]
+        if tp_class.shape[0] == 0:
+            continue
+        tpc = np.cumsum(tp[mask,:], axis=0)
+        fpc = np.cumsum(1 - tp[mask], axis=0)
+        recall = tpc / (nl + eps)
+        precision = tpc / (tpc + fpc)
+
+        conf_masked = conf[mask].ravel()        # flatten về 1D
+        recall_masked = recall[:, 0].ravel()
+        precision_masked = precision[:, 0].ravel()
+        # Interpolation for plotting (numpy)
+        # r[ci] = np.interp(-px, -conf_masked, recall_masked, left=0.0)
+        # p[ci] = np.interp(-px, -conf_masked, precision_masked, left=1.0)
+
+        
+        if len(conf_masked) == 0:  # không có pred cho class này
+            r[ci] = 0
+            p[ci] = 1
+        else:
+            r[ci] = np.interp(-px, -conf_masked, recall_masked, left=0.0)
+            p[ci] = np.interp(-px, -conf_masked, precision_masked, left=1.0)
+
+        # Compute AP for each IoU threshold
+        for j in range(n_iou):
+            m_rec = np.concatenate(([0.0], recall[:, j], [1.0]))
+            m_pre = np.concatenate(([1.0], precision[:, j], [0.0]))
+            # Precision envelope
+            m_pre = np.maximum.accumulate(m_pre[::-1])[::-1]
+            x = np.linspace(0, 1, 101)  # 101-point interpolation
+            ap[ci, j] = np.trapz(np.interp(x, m_rec, m_pre), x)
+
+    # F1 score
+    f1 = 2 * p * r / (p + r + eps)
+    i = f1.mean(0).argmax()  # max F1 index
+    p_mean = p[:, i]
+    r_mean = r[:, i]
+    tp_total = np.round(r_mean * nt)
+    fp_total = np.round(tp_total / (p_mean + eps) - tp_total)
+    ap50 = ap[:, 0]
+    ap_mean = ap.mean(1)
+    map50 = ap50.mean()
+    mean_ap = ap_mean.mean()
+    m_pre = p_mean.mean()
+    m_rec = r_mean.mean()
+
+    return tp_total, fp_total, m_pre, m_rec, map50, mean_ap
+
+# %%
+def compute_ap_cpu(tp, conf, pred_cls, target_cls, eps=1e-16):
+    """
+    Compute average precision (AP) on CPU using numpy.
+    
+    tp: torch.Tensor (n_preds, n_iou_thresholds)
+    conf: torch.Tensor (n_preds,)
+    pred_cls: torch.Tensor (n_preds,)
+    target_cls: torch.Tensor (n_targets,)
+    
+    Returns: tp_total, fp_total, m_pre, m_rec, map50, mean_ap
+    """
+    import numpy as np
+
+    # Move to CPU + numpy
+    tp = tp.cpu().numpy()
+    conf = conf.cpu().numpy()
+    pred_cls = pred_cls.cpu().numpy()
+    target_cls = target_cls.cpu().numpy()
+
+    # Sort by confidence descending
+    sort_idx = np.argsort(-conf)
+    tp = tp[sort_idx]
+    pred_cls = pred_cls[sort_idx].squeeze()
+    conf = conf[sort_idx]
+
+    unique_classes, nt = np.unique(target_cls, return_counts=True)
+    nc = len(unique_classes)
+    n_iou = tp.shape[1]
+
+    ap = np.zeros((nc, n_iou), dtype=np.float32)
+    p = np.zeros((nc, 1000), dtype=np.float32)
+    r = np.zeros((nc, 1000), dtype=np.float32)
+    px = np.linspace(0, 1, 1000)
+
+    for ci, c in enumerate(unique_classes):
+        mask = (pred_cls == c)
+        nl = nt[ci]  # number of labels
+        no = mask.sum()  # number of predictions
+        if no == 0 or nl == 0:
+            r[ci] = np.zeros_like(px)
+            p[ci] = np.ones_like(px)
+            continue
+
+        tp_class = tp[mask, :]  # shape (num_preds_for_class, n_iou)
+        tpc = np.cumsum(tp_class, axis=0)
+        fpc = np.cumsum(1 - tp_class, axis=0)
+
+        recall = tpc / (nl + eps)
+        precision = tpc / (tpc + fpc)
+
+        # Use only first IoU threshold for interp
+        conf_masked = conf[mask].ravel()
+        recall_masked = recall[:, 0].ravel()
+        precision_masked = precision[:, 0].ravel()
+
+        # Ensure same length for interp
+        if len(conf_masked) == 0 or len(recall_masked) == 0:
+            r[ci] = np.zeros_like(px)
+            p[ci] = np.ones_like(px)
+        else:
+            r[ci] = np.interp(-px, -conf_masked, recall_masked, left=0.0)
+            p[ci] = np.interp(-px, -conf_masked, precision_masked, left=1.0)
+
+        # Compute AP for each IoU threshold
+        for j in range(n_iou):
+            m_rec = np.concatenate(([0.0], recall[:, j], [1.0]))
+            m_pre = np.concatenate(([1.0], precision[:, j], [0.0]))
+            m_pre = np.maximum.accumulate(m_pre[::-1])[::-1]  # precision envelope
+            x = np.linspace(0, 1, 101)
+            ap[ci, j] = np.trapz(np.interp(x, m_rec, m_pre), x)
+
+    # F1 score
+    f1 = 2 * p * r / (p + r + eps)
+    i = f1.mean(0).argmax()
+    p_mean = p[:, i]
+    r_mean = r[:, i]
+
+    tp_total = np.round(r_mean * nt)
+    fp_total = np.round(tp_total / (p_mean + eps) - tp_total)
+    ap50 = ap[:, 0]
+    ap_mean = ap.mean(1)
+    map50 = ap50.mean()
+    mean_ap = ap_mean.mean()
+    m_pre = p_mean.mean()
+    m_rec = r_mean.mean()
+
+    return tp_total, fp_total, m_pre, m_rec, map50, mean_ap
 
 
 # %%
@@ -2269,21 +2802,23 @@ for epoch in range(num_epochs):
             # Anchors
             anchor_points, stride_tensor = make_anchors(outputs, model.head.stride, offset=0.5)
             anchor_points = anchor_points.to(device)
-            pred_bboxes = criterion.box_decode(anchor_points, pred_distri)
-            pred_bboxes = pred_bboxes.view(-1, 4)
+            pred_bboxes = box_decode_normalize(anchor_points, stride_tensor, pred_distri)
+            #pred_bboxes = pred_bboxes.reshape(-1, 4)
 
-            # Predicted class & confidence
-            pred_scores_flat = pred_scores.view(-1, NUM_CLASSES)
-            pred_classes = pred_scores_flat.argmax(1)
-            pred_conf = pred_scores_flat.max(1).values
-
+            #Predicted class & confidence
+            #pred_scores_flat = pred_scores.view(-1, NUM_CLASSES)
+            pred_classes = pred_scores.argmax(2)
+            pred_conf = pred_scores.max(2).values
             # Match detections (GPU-native)
-            tp_matrix = build_tp_matrix_torch(pred_bboxes, pred_conf, pred_classes, targets['box'], targets['cls'])
 
+            gt_bboxes_packed, gt_classes_packed = pack_targets(targets['box'], targets['cls'], targets['idx'], B)
+            #tp_matrix = build_tp_matrix_batch(pred_bboxes, pred_conf, pred_classes, targets['box'], targets['cls'], targets['idx'], 32)
+            tp_matrix = build_tp_matrix_batch_yolov8_tensor(pred_bboxes, pred_conf, pred_classes,
+                                                gt_bboxes_packed, gt_classes_packed, B)
             # Append tensors (still on GPU)
             all_tp.append(tp_matrix)
-            all_conf.append(pred_conf)
-            all_pred_cls.append(pred_classes)
+            all_conf.append(pred_conf.reshape(-1,1))
+            all_pred_cls.append(pred_classes.reshape(-1,1))
             all_target_cls.append(targets['cls'])
 
         # Concatenate all batches (GPU)
@@ -2293,7 +2828,7 @@ for epoch in range(num_epochs):
         all_target_cls = torch.cat(all_target_cls, dim=0)
 
         # Compute mAP (GPU)
-        tp_arr, fp_arr, m_pre, m_rec, map50, mean_ap = compute_ap_torch(
+        tp_arr, fp_arr, m_pre, m_rec, map50, mean_ap = compute_ap_cpu(
             all_tp, all_conf, all_pred_cls, all_target_cls
         )
 
@@ -2305,59 +2840,92 @@ for epoch in range(num_epochs):
 
     print(f"Validation metrics: mAP50: {map50:.4f}, mAP50-95: {mean_ap:.4f}")
 
+    print(f"Validation metrics: mAP50: {map50:.4f}, mAP50-95: {mean_ap:.4f}")
+
 # %%
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+NUM_CLASSES = 5
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+torch.manual_seed(1337)
+
+# ===================== Model & Optimizer =====================
+model = MyYolo(version='n').to(device)
+print(f"{sum(p.numel() for p in model.parameters())/1e6:.2f} million parameters")
+print(f"Number of classes (nc): {model.nc}")
+
+criterion = ComputeLoss(model, params)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+num_epochs = 10
+
+# ===================== Training + Validation =====================
 for epoch in range(num_epochs):
     # -------- Training --------
     model.train()
 
+
     # -------- Validation --------
     all_tp, all_conf, all_pred_cls, all_target_cls = [], [], [], []
-    
+
     with torch.no_grad():
+        # val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Val")
         val_pbar = tqdm(val_loader, total=len(val_loader), desc=f"Epoch {epoch+1}/{num_epochs} - Val")
+
         for images, targets in val_pbar:
             images = images.to(device, dtype=torch.float32)
             targets = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in targets.items()}
-    
             outputs = model(images)
             B = images.shape[0]
             x = torch.cat([i.view(B, model.head.no, -1) for i in outputs], dim=2)
             pred_distri, pred_scores = x.split(split_size=(16*4, NUM_CLASSES), dim=1)
             pred_scores = pred_scores.permute(0, 2, 1).contiguous()
             pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-    
+
+            # Anchors
             anchor_points, stride_tensor = make_anchors(outputs, model.head.stride, offset=0.5)
             anchor_points = anchor_points.to(device)
-            pred_bboxes = criterion.box_decode(anchor_points, pred_distri)
-            pred_bboxes = pred_bboxes.view(-1, 4)
-    
-            pred_scores_flat = pred_scores.view(-1, NUM_CLASSES)
-            pred_classes = pred_scores_flat.argmax(1)
-            pred_conf = pred_scores_flat.max(1).values
-    
-            tp_matrix = build_tp_matrix_torch(pred_bboxes, pred_conf, pred_classes, targets['box'], targets['cls'])
-    
+            pred_bboxes = box_decode_normalize(anchor_points, stride_tensor, pred_distri)
+            #pred_bboxes = pred_bboxes.reshape(-1, 4)
+
+            #Predicted class & confidence
+            #pred_scores_flat = pred_scores.view(-1, NUM_CLASSES)
+            pred_classes = pred_scores.argmax(2)
+            pred_conf = pred_scores.max(2).values
+            # Match detections (GPU-native)
+
+            gt_bboxes_packed, gt_classes_packed = pack_targets(targets['box'], targets['cls'], targets['idx'], B)
+            #tp_matrix = build_tp_matrix_batch(pred_bboxes, pred_conf, pred_classes, targets['box'], targets['cls'], targets['idx'], 32)
+            tp_matrix = build_tp_matrix_batch_yolov8_tensor(pred_bboxes, pred_conf, pred_classes,
+                                                gt_bboxes_packed, gt_classes_packed, B)
+            # Append tensors (still on GPU)
             all_tp.append(tp_matrix)
-            all_conf.append(pred_conf)
-            all_pred_cls.append(pred_classes)
+            all_conf.append(pred_conf.reshape(-1,1))
+            all_pred_cls.append(pred_classes.reshape(-1,1))
             all_target_cls.append(targets['cls'])
-    
+
         # Concatenate all batches (GPU)
         all_tp = torch.cat(all_tp, dim=0)
         all_conf = torch.cat(all_conf, dim=0)
         all_pred_cls = torch.cat(all_pred_cls, dim=0)
         all_target_cls = torch.cat(all_target_cls, dim=0)
-    
+        tp = all_tp.cpu()
+        conf = all_conf.cpu()
+        pred_cls = all_pred_cls.cpu()
+        target_cls = all_target_cls.cpu()
         # Compute mAP (GPU)
-        tp_arr, fp_arr, m_pre, m_rec, map50, mean_ap = compute_ap_torch(
-            all_tp, all_conf, all_pred_cls, all_target_cls
+        print(tp[0].shape)
+        tp_arr, fp_arr, m_pre, m_rec, map50, mean_ap = compute_ap_cpu(
+            tp, conf, pred_cls, target_cls
         )
-    
-        # Hiển thị trên tqdm
+
+        # Hiển thị kết quả ngay trên tqdm
         val_pbar.set_postfix({
             "mAP50": f"{map50:.4f}",
             "mAP50-95": f"{mean_ap:.4f}"
         })
 
+    print(f"Precision: {m_pre}, Recall: {m_rec}, Validation metrics: mAP50: {map50:.4f}, mAP50-95: {mean_ap:.4f}")
 
 
