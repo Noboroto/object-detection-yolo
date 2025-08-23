@@ -1213,238 +1213,34 @@ class ComputeLoss:
 
         self.project = torch.arange(m.ch, dtype=torch.float, device=device)
 
-    # def box_decode(self, anchor_points, pred_dist):
-    #     b, a, c = pred_dist.shape
-    #     pred_dist = pred_dist.reshape(b, a, 4, c // 4)
-    #     pred_dist = pred_dist.softmax(3)
-    #     pred_dist = pred_dist.matmul(self.project.type(pred_dist.dtype))
-    #     lt, rb = pred_dist.chunk(2, -1)
-    #     x1y1 = anchor_points - lt
-    #     x2y2 = anchor_points + rb
-    #     return torch.cat(tensors=(x1y1, x2y2), dim=-1)
-
-    # def box_decode(self, anchor_points, pred_dist):
-    #     b, a, c = pred_dist.shape
-    #     pred_dist = pred_dist.reshape(b, a, 4, c // 4)
-    #     pred_dist = pred_dist.softmax(3)
-    #     # SỬA: Ensure self.project is on the same device as pred_dist
-    #     project = self.project.to(pred_dist.device).type(pred_dist.dtype)
-    #     pred_dist = pred_dist.matmul(project)
-    #     lt, rb = pred_dist.chunk(2, -1)
-    #     x1y1 = anchor_points - lt
-    #     x2y2 = anchor_points + rb
-    #     return torch.cat(tensors=(x1y1, x2y2), dim=-1)
-
     def box_decode(self, anchor_points, pred_dist):
+        """
+        Decode predicted distribution to bounding boxes.
+        
+        Args:
+            anchor_points: (N, 2) anchor points
+            pred_dist: (B, N, 4*reg_max) predicted distribution
+            
+        Returns:
+            (B, N, 4) decoded bounding boxes in xyxy format
+        """
         b, a, c = pred_dist.shape
+        # Reshape to (B, N, 4, reg_max) for DFL processing
         pred_dist = pred_dist.reshape(b, a, 4, c // 4)
         pred_dist = pred_dist.softmax(3)
-    
-        # Ensure all tensors on the same device
-        device = pred_dist.device
-        anchor_points = anchor_points.to(device)
-        project = self.project.to(device).type(pred_dist.dtype)
-    
-        pred_dist = pred_dist.matmul(project)
+        
+        # Use the project tensor for weighted sum (DFL)
+        pred_dist = pred_dist.matmul(self.project.to(pred_dist.device))
+        
+        # Split into left-top and right-bottom deltas
         lt, rb = pred_dist.chunk(2, -1)
-        x1y1 = anchor_points - lt
-        x2y2 = anchor_points + rb
-    
+        
+        # Convert to absolute coordinates
+        anchor_points = anchor_points.to(pred_dist.device)
+        x1y1 = anchor_points - lt  # top-left corner
+        x2y2 = anchor_points + rb  # bottom-right corner
+        
         return torch.cat((x1y1, x2y2), dim=-1)
-
-    # def __call__(self, outputs, targets):
-    #     #*****************************
-    #     # with debug_block("ComputeLoss.__call__ / inputs"):
-    #     #     # Kiểm tra outputs
-    #     #     print("num.feature levels:", len(outputs))
-    #     #     for li, o in enumerate(outputs):
-    #     #         print(f"  L{li} shape={tuple(o.shape)}")  # (B, no, H, W)
-    
-    #     #     # Kiểm tra targets dict
-    #     #     print("targets keys:", list(targets.keys()))
-    #     #     tstats("targets['idx']", targets['idx'])
-    #     #     tstats("targets['cls']", targets['cls'])
-    #     #     tstats("targets['box']", targets['box'])
-    #     #     if 'cls' in targets:
-    #     #         tuniq("targets['cls'] uniq", targets['cls'])
-    #     #*****************************************
-
-
-
-
-        
-    #     x = torch.cat([i.reshape(outputs[0].shape[0], self.no, -1) for i in outputs], dim=2)
-    #     pred_distri, pred_scores = x.split(split_size=(self.reg_max * 4, self.nc), dim=1)
-
-    #     pred_scores = pred_scores.permute(0, 2, 1).contiguous()
-    #     pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-
-
-
-        
-    #     #***********************************     
-    #     # with debug_block("pred tensors"):
-    #     #     tstats("pred_scores(logits)", pred_scores)
-    #     #     tstats("pred_scores(sigmoid)", pred_scores.sigmoid())
-    #     #     tstats("pred_distri", pred_distri)
-    #     #*********************************
-
-
-
-        
-    #     data_type = pred_scores.dtype
-    #     batch_size = pred_scores.shape[0]
-    #     input_size = torch.tensor(outputs[0].shape[2:], device=self.device, dtype=data_type) * self.stride[0]
-    #     anchor_points, stride_tensor = make_anchors(outputs, self.stride, offset=0.5)
-
-
-
-
-
-    #     #***********************************
-    #     # with debug_block("anchors"):
-    #     #     tstats("anchor_points", anchor_points)
-    #     #     tstats("stride_tensor", stride_tensor)
-    #     #*****************************
-
-
-
-
-    #     idx = targets['idx'].reshape(-1, 1)
-    #     cls = targets['cls'].reshape(-1, 1)
-    #     box = targets['box']
-
-
-
-    #     #***************************
-    #     # # Sanity: class hợp lệ?
-    #     # assert (cls >= 0).all(), "Found negative class id"
-    #     # assert (cls < self.nc).all(), f"Found class id >= nc ({self.nc})"
-    #     #***************************
-
-
-
-
-
-
-    #     targets = torch.cat((idx, cls, box), dim=1).to(self.device)
-    #     if targets.shape[0] == 0:
-    #         gt = torch.zeros(batch_size, 0, 5, device=self.device)
-    #     else:
-    #         i = targets[:, 0]
-    #         _, counts = i.unique(return_counts=True)
-    #         counts = counts.to(dtype=torch.int32)
-    #         gt = torch.zeros(batch_size, counts.max(), 5, device=self.device)
-    #         for j in range(batch_size):
-    #             matches = i == j
-    #             n = matches.sum()
-    #             if n:
-    #                 gt[j, :n] = targets[matches, 1:]
-    #         x = gt[..., 1:5].mul_(input_size[[1, 0, 1, 0]])
-    #         y = torch.empty_like(x)
-    #         dw = x[..., 2] / 2  # half-width
-    #         dh = x[..., 3] / 2  # half-height
-    #         y[..., 0] = x[..., 0] - dw  # top left x
-    #         y[..., 1] = x[..., 1] - dh  # top left y
-    #         y[..., 2] = x[..., 0] + dw  # bottom right x
-    #         y[..., 3] = x[..., 1] + dh  # bottom right y
-    #         gt[..., 1:5] = y
-    #     gt_labels, gt_bboxes = gt.split((1, 4), 2)
-    #     mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0)
-
-    #     #***************************
-    #     # with debug_block("GT build"):
-    #     #     tstats("gt_labels", gt_labels)
-    #     #     tuniq("gt_labels uniq", gt_labels.reshape(-1))
-    #     #     tstats("gt_bboxes", gt_bboxes)
-    #     #     print("mask_gt sum:", mask_gt.sum().item())
-    #     #***************************
-
-
-
-
-
-    #     pred_bboxes = self.box_decode(anchor_points, pred_distri)
-
-
-    #     #***************************
-    #     # with debug_block("decoded boxes"):
-    #     #     tstats("pred_bboxes(decoded)", pred_bboxes)
-    #     #***************************
-
-
-    #     assigned_targets = self.assigner(pred_scores.detach().sigmoid(),
-    #                                      (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
-    #                                      anchor_points * stride_tensor, gt_labels, gt_bboxes, mask_gt)
-    #     target_bboxes, target_scores, fg_mask = assigned_targets
-
-
-    #     #***************************
-    #     # with debug_block("after assigner"):
-    #     #     tstats("target_bboxes", target_bboxes)
-    #     #     tstats("target_scores", target_scores)
-    #     #     print("target_scores > 0:", (target_scores > 0).sum().item())
-    #     #     print("fg_mask sum:", fg_mask.sum().item())
-    #     #***************************
-
-
-    #     # # SỬA: Quan trọng: dùng clamp để đảm bảo tensor cùng device, tránh Python int.
-    #     target_scores_sum = target_scores.sum().clamp(min=1.0)
-
-    #     loss_cls = self.cls_loss(pred_scores, target_scores.to(data_type)).sum() / target_scores_sum  # BCE
-
-    #     # #SỬA: scale lại cls loss theo số lượng foreground anchors nếu muốn
-    #     # fg_mask_cls = target_scores.sum(-1) > 0
-    #     # pred_scores_pos = pred_scores[fg_mask_cls]
-    #     # target_scores_pos = target_scores[fg_mask_cls]
-        
-    #     # if fg_mask_cls.sum() > 0:
-    #     #     loss_cls = self.cls_loss(pred_scores_pos, target_scores_pos).sum() / fg_mask_cls.sum()  # sum()/num_foreground
-    #     # else:
-    #     #     loss_cls = torch.zeros(1, device=pred_scores.device)
-
-    #     # SỐ foreground anchors (tính theo mask) #SỬA
-    #     #num_fg_anchors = fg_mask.sum().clamp(min=1.0)  
-        
-    #     # Classification loss (BCE) #SỬA
-    #     # Dùng mean trên lớp, sau đó sum trên foreground anchors
-    #     #loss_cls = (self.cls_loss(pred_scores, target_scores.to(pred_scores.dtype)).sum(dim=-1)  # sum over nc
-    #                 #[fg_mask]).sum() / num_fg_anchors
-
-    #     # with debug_block("cls loss"):
-    #     #     print("target_scores_sum:", float(target_scores_sum.detach().cpu()))
-    #     #     tstats("BCE elem", self.cls_loss(pred_scores, target_scores.to(data_type)))
-    #     #     print("loss_cls:", float(loss_cls.detach().cpu()))
-
-    #     # Box loss
-    #     loss_box = torch.zeros(1, device=self.device)
-    #     loss_dfl = torch.zeros(1, device=self.device)
-    #     if fg_mask.sum():
-    #         target_bboxes /= stride_tensor
-    #         loss_box, loss_dfl = self.box_loss(pred_distri,
-    #                                            pred_bboxes,
-    #                                            anchor_points,
-    #                                            target_bboxes,
-    #                                            target_scores,
-    #                                            target_scores_sum, fg_mask)
-    #     else:
-    #         print("NOTE: fg_mask.sum()==0 => loss_box=0, loss_dfl=0")
-
-
-    #     # loss_box đã tính xong từ BoxLoss.forward
-    #     # print("loss_box (before gain):", float(loss_box.detach().cpu()))
-    #     # print("box_gain:", self.params['box'])
-        
-    #     loss_box *= self.params['box']  # box gain
-    #     loss_cls *= self.params['cls']  # cls gain
-    #     loss_dfl *= self.params['dfl']  # dfl gain
-
-    #     # with debug_block("final losses (after gain)"):
-    #     #     print(f"loss_box={float(loss_box.detach().cpu()):.6f} "
-    #     #           f"loss_cls={float(loss_cls.detach().cpu()):.6f} "
-    #     #           f"loss_dfl={float(loss_dfl.detach().cpu()):.6f}")
-        
-    #     return loss_box, loss_cls, loss_dfl
 
     def __call__(self, outputs, targets):
         """
@@ -1747,42 +1543,34 @@ class Dataset(data.Dataset):
 
     @staticmethod
     def load_label(filenames):
+        """
+        FAST label loading without heavy PIL verification.
+        Major performance improvement by skipping image.verify()
+        """
         x = {}
         for filename in filenames:
             try:
-                # verify images
-                with open(filename, 'rb') as f:
-                    image = Image.open(f)
-                    image.verify()  # PIL verify
-                shape = image.size  # image size
-                assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} <10 pixels'
-                assert image.format.lower() in FORMATS, f'invalid image format {image.format}'
-
-                # verify labels
+                # Skip PIL verification - major speedup!
+                # Only do basic path operations
                 a = f'{os.sep}images{os.sep}'
                 b = f'{os.sep}labels{os.sep}'
                 label_path = b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt'
-                if os.path.isfile(b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt'):
-                    with open(label_path) as f:
-                        label = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                        label = numpy.array(label, dtype=numpy.float32)
-                    nl = len(label)
-                    if nl:
-                        assert (label >= 0).all()
-                        assert label.shape[1] == 5
-                        assert (label[:, 1:] <= 1).all()
-                        _, i = numpy.unique(label, axis=0, return_index=True)
-                        if len(i) < nl:  # duplicate row check
-                            label = label[i]  # remove duplicates
-                    else:
+                
+                if os.path.isfile(label_path):
+                    # Fast numpy loading instead of manual parsing
+                    try:
+                        label = numpy.loadtxt(label_path, dtype=numpy.float32, ndmin=2)
+                        # Basic validation only
+                        if label.size > 0 and label.shape[1] != 5:
+                            label = numpy.zeros((0, 5), dtype=numpy.float32)
+                    except (ValueError, OSError):
                         label = numpy.zeros((0, 5), dtype=numpy.float32)
                 else:
                     label = numpy.zeros((0, 5), dtype=numpy.float32)
-            except FileNotFoundError:
-                label = numpy.zeros((0, 5), dtype=numpy.float32)
-            except AssertionError:
-                continue
-            x[filename] = label
+                    
+                x[filename] = label
+            except Exception:
+                x[filename] = numpy.zeros((0, 5), dtype=numpy.float32)
         return x
 
 
@@ -1996,10 +1784,14 @@ params = {
 # %%
 train_dir = os.path.join(DATASET_PATH, "train", "images")
 
-filenames_train = []
-for filename in os.listdir(train_dir):
-    if filename.endswith(('.jpg', '.png', '.jpeg')):
-        filenames_train.append(os.path.join(train_dir, filename))
+# ✅ OPTIMIZED: Use pathlib for faster file operations
+from pathlib import Path
+train_path = Path(train_dir)
+filenames_train = [str(p) for p in train_path.glob('*.jpg')] + \
+                 [str(p) for p in train_path.glob('*.png')] + \
+                 [str(p) for p in train_path.glob('*.jpeg')]
+
+print(f"Found {len(filenames_train)} training images")
 
 input_size = 640
 
@@ -2011,20 +1803,45 @@ train_data = Dataset(
     augment=False   # False = không dùng augmentation
 )
 
-# DataLoader
+# DataLoader - OPTIMIZED for Windows with multiprocessing fix
+import multiprocessing as mp
+import sys
+
+# Fix for Windows multiprocessing
+if __name__ == '__main__' or 'ipykernel' in sys.modules:
+    # Set multiprocessing start method for better compatibility
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Already set
+    
+    # Use multiple workers
+    train_num_workers = min(8, os.cpu_count() or 1)
+    val_num_workers = min(4, os.cpu_count() or 1)
+else:
+    # In module import context, use single-threaded
+    train_num_workers = 0
+    val_num_workers = 0
+
 train_loader = DataLoader(
     train_data,
     batch_size=32,
-    num_workers=2,
+    num_workers=train_num_workers,
     pin_memory=True,
+    persistent_workers=train_num_workers > 0,  # Only if using workers
+    prefetch_factor=4 if train_num_workers > 0 else None,
     collate_fn=Dataset.collate_fn
 )
 
 val_dir = os.path.join(DATASET_PATH, "valid", "images")
 
-filenames_val = [os.path.join(val_dir, f) 
-                 for f in os.listdir(val_dir) 
-                 if f.endswith(('.jpg', '.png', '.jpeg'))]
+# ✅ OPTIMIZED: Use pathlib for faster validation file listing
+val_path = Path(val_dir)
+filenames_val = [str(p) for p in val_path.glob('*.jpg')] + \
+               [str(p) for p in val_path.glob('*.png')] + \
+               [str(p) for p in val_path.glob('*.jpeg')]
+
+print(f"Found {len(filenames_val)} validation images")
 
 val_dataset = Dataset(
     filenames_val,
@@ -2036,8 +1853,10 @@ val_dataset = Dataset(
 val_loader = DataLoader(
     val_dataset,
     batch_size=8,      
-    num_workers=2,
+    num_workers=val_num_workers,  # Use the safe num_workers
     pin_memory=True,
+    persistent_workers=val_num_workers > 0,  # Only if using workers
+    prefetch_factor=2 if val_num_workers > 0 else None,
     collate_fn=Dataset.collate_fn
 )
 
@@ -2045,16 +1864,46 @@ val_loader = DataLoader(
 
 
 print(f"Train_loader : {len(train_loader)} batches")
-
 print(f"Val_loader: {len(val_loader)} batches")
 
 # %%
-batch=next(iter(train_loader))
-print("All keys in batch      : ", batch[1].keys())
-print(f"Input batch shape      : ", batch[0].shape)
-print(f"Classification scores  : {batch[1]['cls'].shape}")
-print(f"Box coordinates        : {batch[1]['box'].shape}")
-print(f"Index identifier (which score belongs to which image): {batch[1]['idx'].shape}")
+# Test batch loading - wrapped in main guard for Windows compatibility
+if __name__ == '__main__' or 'ipykernel' in sys.modules:
+    print("\n[INFO] Testing batch loading...")
+    try:
+        batch = next(iter(train_loader))
+        print("All keys in batch      : ", batch[1].keys())
+        print(f"Input batch shape      : ", batch[0].shape)
+        print(f"Classification scores  : {batch[1]['cls'].shape}")
+        print(f"Box coordinates        : {batch[1]['box'].shape}")
+        print(f"Index identifier (which score belongs to which image): {batch[1]['idx'].shape}")
+        print("[SUCCESS] Batch loading test completed!")
+    except Exception as e:
+        print(f"[ERROR] Batch loading failed: {e}")
+        print("[FALLBACK] Setting num_workers=0 for compatibility")
+        
+        # Fallback to single-threaded mode
+        train_loader = DataLoader(
+            train_data,
+            batch_size=32,
+            num_workers=0,
+            pin_memory=False,
+            collate_fn=Dataset.collate_fn
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=8,
+            num_workers=0,
+            pin_memory=False,
+            collate_fn=Dataset.collate_fn
+        )
+        
+        # Test again
+        batch = next(iter(train_loader))
+        print("[SUCCESS] Batch loading with num_workers=0 completed!")
+else:
+    print("[INFO] Batch loading test skipped (module import mode)")
 
 # %% [markdown]
 # # GPU FULL
@@ -2077,282 +1926,6 @@ def box_decode_normalize(anchor_points, stride_tensor, pred_dist):
     x2y2 = anchor_points + rb
     
     return torch.cat((x1y1, x2y2), dim=-1)*stride_tensor/input_size
-
-# def bbox_iou_torch(box1, box2):
-#     """
-#     Compute IoU between two sets of boxes using PyTorch (GPU compatible)
-#     box1: (N,4) xyxy
-#     box2: (M,4) xyxy
-#     return: (N,M) IoU matrix
-#     """
-#     N = box1.shape[0]
-#     M = box2.shape[0]
-
-#     inter_x1 = torch.max(box1[:, None, 0], box2[None, :, 0])
-#     inter_y1 = torch.max(box1[:, None, 1], box2[None, :, 1])
-#     inter_x2 = torch.min(box1[:, None, 2], box2[None, :, 2])
-#     inter_y2 = torch.min(box1[:, None, 3], box2[None, :, 3])
-
-#     inter_w = torch.clamp(inter_x2 - inter_x1, min=0)
-#     inter_h = torch.clamp(inter_y2 - inter_y1, min=0)
-#     inter_area = inter_w * inter_h
-
-#     area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
-#     area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
-#     union = area1[:, None] + area2[None, :] - inter_area
-
-#     iou = inter_area / (union + 1e-16)
-#     return iou
-
-
-# def match_detections_torch(pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes, iou_threshold=0.5):
-#     """
-#     GPU version of TP matching
-#     """
-#     device = pred_bboxes.device
-#     num_pred = pred_bboxes.shape[0]
-#     tp = torch.zeros((num_pred,), device=device)
-
-#     if gt_bboxes.shape[0] == 0 or num_pred == 0:
-#         return tp
-
-#     sort_idx = torch.argsort(-pred_conf)
-#     pred_bboxes = pred_bboxes[sort_idx]
-#     pred_classes = pred_classes[sort_idx]
-
-#     assigned_gt = torch.zeros(gt_bboxes.shape[0], dtype=torch.bool, device=device)
-#     ious = bbox_iou_torch(pred_bboxes, gt_bboxes)
-
-#     for i in range(num_pred):
-#         cls_matches = (pred_classes[i] == gt_classes)
-#         iou_matches = ious[i] >= iou_threshold
-#         matches = cls_matches & iou_matches & (~assigned_gt)
-#         if matches.any():
-#             gt_idx = torch.argmax(ious[i] * matches.float())
-#             tp[sort_idx[i]] = 1
-#             assigned_gt[gt_idx] = True
-
-#     return tp
-
-
-# def build_tp_matrix_torch(pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes):
-#     """
-#     Trả về ma trận TP (num_preds, 10) trên GPU
-#     """
-#     device = pred_bboxes.device
-#     iou_thresholds = torch.arange(0.5, 1.0, 0.05, device=device)
-#     num_preds = pred_bboxes.shape[0]
-#     tp_matrix = torch.zeros((num_preds, len(iou_thresholds)), device=device)
-
-#     for j, thr in enumerate(iou_thresholds):
-#         tp_matrix[:, j] = match_detections_torch(
-#             pred_bboxes, pred_conf, pred_classes, gt_bboxes, gt_classes, iou_threshold=thr
-#         )
-
-#     return tp_matrix
-
-
-# %%
-# import torch
-
-# def bbox_iou_torch(boxes1, boxes2):
-#     """
-#     boxes1: (B, N, 4) [x1, y1, x2, y2]
-#     boxes2: (B, M, 4)
-#     return: (B, N, M)
-#     """
-#     # (B, N, 1, 4), (B, 1, M, 4) -> broadcast
-#     b1_x1, b1_y1, b1_x2, b1_y2 = boxes1[..., 0:1], boxes1[..., 1:2], boxes1[..., 2:3], boxes1[..., 3:4]
-#     b2_x1, b2_y1, b2_x2, b2_y2 = boxes2[..., 0], boxes2[..., 1], boxes2[..., 2], boxes2[..., 3]
-
-#     inter_x1 = torch.max(b1_x1, b2_x1[:, None, :])
-#     inter_y1 = torch.max(b1_y1, b2_y1[:, None, :])
-#     inter_x2 = torch.min(b1_x2, b2_x2[:, None, :])
-#     inter_y2 = torch.min(b1_y2, b2_y2[:, None, :])
-
-#     inter_w = (inter_x2 - inter_x1).clamp(min=0)
-#     inter_h = (inter_y2 - inter_y1).clamp(min=0)
-#     inter_area = inter_w * inter_h
-
-#     area1 = (b1_x2 - b1_x1) * (b1_y2 - b1_y1)
-#     area2 = (b2_x2 - b2_x1) * (b2_y2 - b2_y1)
-
-#     union = area1[:, :, None] + area2[:, None, :] - inter_area
-#     return inter_area / (union + 1e-6)
-
-
-# def build_tp_matrix_batch(pred_bboxes, pred_conf, pred_classes,
-#                           gt_bboxes, gt_classes, B=32):
-#     """
-#     Batch version, hỗ trợ input flatten (B*N, 4)
-
-#     pred_bboxes: (B*N, 4) hoặc (B, N, 4)
-#     pred_conf:   (B*N,)   hoặc (B, N)
-#     pred_classes:(B*N,)   hoặc (B, N)
-#     gt_bboxes:   (B, M, 4)
-#     gt_classes:  (B, M)
-
-#     return: tp_matrix (B*N, T) với T=10 thresholds (0.5:0.05:0.95)
-#     """
-#     device = pred_bboxes.device
-#     iou_thresholds = torch.arange(0.5, 1.0, 0.05, device=device)  # (T,)
-
-#     # Nếu input đã flatten → reshape lại
-#     if pred_bboxes.dim() == 2:   # (B*N, 4)
-#         assert B is not None, "Cần truyền số batch B nếu input flatten"
-#         N = pred_bboxes.shape[0] // B
-#         pred_bboxes = pred_bboxes.view(B, N, 4)
-#         pred_conf   = pred_conf.view(B, N)
-#         pred_classes= pred_classes.view(B, N)
-
-#     B, N, _ = pred_bboxes.shape
-#     M = gt_bboxes.shape[1]
-#     T = len(iou_thresholds)
-
-#     # Sort predictions by confidence
-#     sort_idx = torch.argsort(pred_conf, dim=1, descending=True)
-#     pred_bboxes = torch.gather(pred_bboxes, 1, sort_idx[..., None].expand(-1, -1, 4))
-#     pred_classes = torch.gather(pred_classes, 1, sort_idx)
-
-#     # IoU (B, N, M)
-#     ious = bbox_iou_torch(pred_bboxes, gt_bboxes)
-
-#     tp_matrix = torch.zeros((B, N, T), device=device)
-
-#     for b in range(B):
-#         assigned_gt = torch.zeros(M, dtype=torch.bool, device=device)
-#         for n in range(N):
-#             cls_matches = (pred_classes[b, n] == gt_classes[b])  # (M,)
-#             for t, thr in enumerate(iou_thresholds):
-#                 iou_matches = (ious[b, n] >= thr)
-#                 matches = cls_matches & iou_matches & (~assigned_gt)
-#                 if matches.any():
-#                     gt_idx = torch.argmax(ious[b, n] * matches.float())
-#                     tp_matrix[b, n, t] = 1
-#                     assigned_gt[gt_idx] = True
-
-#     # Flatten về (B*N, T)
-#     tp_matrix = tp_matrix.view(B * N, T)
-#     return tp_matrix
-
-# %%
-# import torch
-
-# def bbox_iou_torch(boxes1, boxes2):
-#     """
-#     boxes1: (B, N, 4) [x1, y1, x2, y2]
-#     boxes2: (B, M, 4)
-#     return: (B, N, M)
-#     """
-#     b1_x1, b1_y1, b1_x2, b1_y2 = boxes1[..., 0:1], boxes1[..., 1:2], boxes1[..., 2:3], boxes1[..., 3:4]
-#     b2_x1, b2_y1, b2_x2, b2_y2 = boxes2[..., 0:1], boxes2[..., 1:2], boxes2[..., 2:3], boxes2[..., 3:4]
-
-#     # (B, N, 1) vs (B, 1, M) → broadcast thành (B, N, M)
-#     inter_x1 = torch.max(b1_x1, b2_x1.transpose(1, 2))
-#     inter_y1 = torch.max(b1_y1, b2_y1.transpose(1, 2))
-#     inter_x2 = torch.min(b1_x2, b2_x2.transpose(1, 2))
-#     inter_y2 = torch.min(b1_y2, b2_y2.transpose(1, 2))
-
-#     inter_w = (inter_x2 - inter_x1).clamp(min=0)
-#     inter_h = (inter_y2 - inter_y1).clamp(min=0)
-#     inter_area = inter_w * inter_h
-
-#     area1 = (b1_x2 - b1_x1) * (b1_y2 - b1_y1)       # (B, N, 1)
-#     area2 = (b2_x2 - b2_x1) * (b2_y2 - b2_y1)       # (B, M, 1)
-
-#     union = area1 + area2.transpose(1, 2) - inter_area
-#     return inter_area / (union + 1e-6)
-
-# def pack_targets(gt_bboxes, gt_classes, gt_idx, B, pad_val=-1):
-#     """
-#     Gom ground truth về dạng (B, M, 4), (B, M)
-#     gt_bboxes: (T, 4)
-#     gt_classes: (T,)
-#     gt_idx: (T,) batch index ứng với mỗi GT
-#     B: batch size
-#     pad_val: giá trị điền vào chỗ trống (default -1)
-#     """
-#     # Số lượng box tối đa trên 1 ảnh
-#     M = gt_idx.long().bincount(minlength=B).max().item()
-
-#     # Khởi tạo tensor
-#     out_boxes = torch.full((B, M, 4), pad_val, device=gt_bboxes.device, dtype=gt_bboxes.dtype)
-#     out_classes = torch.full((B, M), pad_val, device=gt_classes.device, dtype=gt_classes.dtype)
-
-#     counter = torch.zeros(B, dtype=torch.long, device=gt_bboxes.device)
-
-#     for i in range(gt_bboxes.shape[0]):
-#         b = int(gt_idx[i])
-#         j = counter[b].item()
-#         out_boxes[b, j] = gt_bboxes[i]
-#         out_classes[b, j] = gt_classes[i]
-#         counter[b] += 1
-
-#     return out_boxes, out_classes
-
-
-# def build_tp_matrix_batch(pred_bboxes, pred_conf, pred_classes,
-#                           gt_bboxes, gt_classes, gt_idx=None, B=32):
-#     """
-#     Batch version, hỗ trợ cả input flatten (B*N, 4) và target flatten (T, 4)
-
-#     pred_bboxes: (B*N, 4) hoặc (B, N, 4)
-#     pred_conf:   (B*N,)   hoặc (B, N)
-#     pred_classes:(B*N,)   hoặc (B, N)
-#     gt_bboxes:   (B, M, 4) hoặc (T, 4)
-#     gt_classes:  (B, M)   hoặc (T,)
-#     gt_idx:      (T,) nếu gt flatten
-#     B: batch size
-
-#     return: tp_matrix (B*N, T) với T=10 thresholds (0.5:0.05:0.95)
-#     """
-#     device = pred_bboxes.device
-#     iou_thresholds = torch.arange(0.5, 1.0, 0.05, device=device)  # (T,)
-
-#     # Nếu pred flatten → reshape
-#     if pred_bboxes.dim() == 2:   # (B*N, 4)
-#         assert B is not None, "Cần truyền số batch B nếu input flatten"
-#         N = pred_bboxes.shape[0] // B
-#         pred_bboxes = pred_bboxes.view(B, N, 4)
-#         pred_conf   = pred_conf.view(B, N)
-#         pred_classes= pred_classes.view(B, N)
-
-#     B, N, _ = pred_bboxes.shape
-
-#     # Nếu gt flatten → pack về (B, M, 4), (B, M)
-#     if gt_bboxes.dim() == 2:   # (T, 4)
-#         assert gt_idx is not None, "Cần gt_idx để pack target"
-#         gt_bboxes, gt_classes = pack_targets(gt_bboxes, gt_classes, gt_idx, B)
-
-#     M = gt_bboxes.shape[1]
-#     T = len(iou_thresholds)
-
-#     # Sort predictions by confidence
-#     sort_idx = torch.argsort(pred_conf, dim=1, descending=True)
-#     pred_bboxes = torch.gather(pred_bboxes, 1, sort_idx[..., None].expand(-1, -1, 4))
-#     pred_classes = torch.gather(pred_classes, 1, sort_idx)
-
-#     # IoU (B, N, M)
-#     ious = bbox_iou_torch(pred_bboxes, gt_bboxes)
-
-#     tp_matrix = torch.zeros((B, N, T), device=device)
-
-#     for b in range(B):
-#         assigned_gt = torch.zeros(M, dtype=torch.bool, device=device)
-#         for n in range(N):
-#             cls_matches = (pred_classes[b, n] == gt_classes[b])  # (M,)
-#             for t, thr in enumerate(iou_thresholds):
-#                 iou_matches = (ious[b, n] >= thr)
-#                 matches = cls_matches & iou_matches & (~assigned_gt)
-#                 if matches.any():
-#                     gt_idx_ = torch.argmax(ious[b, n] * matches.float())
-#                     tp_matrix[b, n, t] = 1
-#                     assigned_gt[gt_idx_] = True
-
-#     # Flatten về (B*N, T)
-#     tp_matrix = tp_matrix.view(B * N, T)
-#     return tp_matrix
-
 
 # %%
 import torch
@@ -2545,104 +2118,6 @@ def compute_ap_torch(tp, conf, pred_cls, target_cls, eps=1e-16):
 
     map50, mean_ap = ap50.mean().item(), ap_mean.mean().item()
     return tp_total.cpu().numpy(), fp_total.cpu().numpy(), p_mean.mean().item(), r_mean.mean().item(), map50, mean_ap
-
-
-# %%
-def compute_ap_cpu(tp, conf, pred_cls, target_cls, eps=1e-16):
-    """
-    Compute average precision (AP) on CPU tensors using numpy for interpolation.
-    
-    Args:
-        tp: torch.Tensor, (n_preds, n_iou_thresholds)
-        conf: torch.Tensor, (n_preds,)
-        pred_cls: torch.Tensor, (n_preds,)
-        target_cls: torch.Tensor, (n_targets,)
-        eps: float, small number to avoid div by zero
-    
-    Returns:
-        tp_total: np.array, true positives per class
-        fp_total: np.array, false positives per class
-        m_pre: float, mean precision
-        m_rec: float, mean recall
-        map50: float, mAP@0.5
-        mean_ap: float, mAP@0.5:0.95
-    """
-    # Move everything to CPU
-    tp = tp.cpu().numpy()
-    conf = conf.cpu().numpy()
-    pred_cls = pred_cls.cpu().numpy()
-    target_cls = target_cls.cpu().numpy()
-
-    # Sort by confidence
-    sort_idx = np.argsort(-conf)
-    tp = tp[sort_idx]
-    pred_cls = pred_cls[sort_idx]
-    conf = conf[sort_idx]
-
-    unique_classes, nt = np.unique(target_cls, return_counts=True)
-    nc = len(unique_classes)
-    n_iou = tp.shape[1]
-
-    ap = np.zeros((nc, n_iou), dtype=np.float32)
-    p = np.zeros((nc, 1000), dtype=np.float32)
-    r = np.zeros((nc, 1000), dtype=np.float32)
-    px = np.linspace(0, 1, 1000)
-
-    for ci, c in enumerate(unique_classes):
-        #mask = pred_cls == c
-        mask = (pred_cls.squeeze() == c)
-        nl = nt[ci]  # number of labels
-        no = mask.sum()  # number of predictions
-        if no == 0 or nl == 0:
-            continue
-        print("mask:",mask.shape)
-        tp_class = tp[mask, :]
-        if tp_class.shape[0] == 0:
-            continue
-        tpc = np.cumsum(tp[mask,:], axis=0)
-        fpc = np.cumsum(1 - tp[mask], axis=0)
-        recall = tpc / (nl + eps)
-        precision = tpc / (tpc + fpc)
-
-        conf_masked = conf[mask].ravel()        # flatten về 1D
-        recall_masked = recall[:, 0].ravel()
-        precision_masked = precision[:, 0].ravel()
-        # Interpolation for plotting (numpy)
-        # r[ci] = np.interp(-px, -conf_masked, recall_masked, left=0.0)
-        # p[ci] = np.interp(-px, -conf_masked, precision_masked, left=1.0)
-
-        
-        if len(conf_masked) == 0:  # không có pred cho class này
-            r[ci] = 0
-            p[ci] = 1
-        else:
-            r[ci] = np.interp(-px, -conf_masked, recall_masked, left=0.0)
-            p[ci] = np.interp(-px, -conf_masked, precision_masked, left=1.0)
-
-        # Compute AP for each IoU threshold
-        for j in range(n_iou):
-            m_rec = np.concatenate(([0.0], recall[:, j], [1.0]))
-            m_pre = np.concatenate(([1.0], precision[:, j], [0.0]))
-            # Precision envelope
-            m_pre = np.maximum.accumulate(m_pre[::-1])[::-1]
-            x = np.linspace(0, 1, 101)  # 101-point interpolation
-            ap[ci, j] = np.trapz(np.interp(x, m_rec, m_pre), x)
-
-    # F1 score
-    f1 = 2 * p * r / (p + r + eps)
-    i = f1.mean(0).argmax()  # max F1 index
-    p_mean = p[:, i]
-    r_mean = r[:, i]
-    tp_total = np.round(r_mean * nt)
-    fp_total = np.round(tp_total / (p_mean + eps) - tp_total)
-    ap50 = ap[:, 0]
-    ap_mean = ap.mean(1)
-    map50 = ap50.mean()
-    mean_ap = ap_mean.mean()
-    m_pre = p_mean.mean()
-    m_rec = r_mean.mean()
-
-    return tp_total, fp_total, m_pre, m_rec, map50, mean_ap
 
 # %%
 def compute_ap_cpu(tp, conf, pred_cls, target_cls, eps=1e-16):
