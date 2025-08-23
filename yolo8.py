@@ -591,15 +591,6 @@ def export_onnx(args):
     # Inference example
     # https://github.com/ultralytics/ultralytics/blob/main/ultralytics/nn/autobackend.py
 
-
-# def wh2xy(x):
-#     y = x.clone() if isinstance(x, torch.Tensor) else numpy.copy(x)
-#     y[:, 0] = x[:, 0] - x[:, 2] / 2  # top left x
-#     y[:, 1] = x[:, 1] - x[:, 3] / 2  # top left y
-#     y[:, 2] = x[:, 0] + x[:, 2] / 2  # bottom right x
-#     y[:, 3] = x[:, 1] + x[:, 3] / 2  # bottom right y
-#     return y
-
 def wh2xy(x, w=640, h=640, pad_w=0, pad_h=0):
     # Convert nx4 boxes
     # from [x, y, w, h] normalized to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
@@ -964,14 +955,6 @@ class Assigner(torch.nn.Module):
 
     @torch.no_grad()
     def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
-        # with debug_block("Assigner.forward / inputs"):
-        #     print(f"pd_scores: {tuple(pd_scores.shape)}  (B, A, C)")
-        #     print(f"pd_bboxes: {tuple(pd_bboxes.shape)}  (B, A, 4)")
-        #     print(f"anc_points: {tuple(anc_points.shape)} (A, 2)")
-        #     print(f"gt_labels: {tuple(gt_labels.shape)}  (B, M, 1)")
-        #     print(f"gt_bboxes: {tuple(gt_bboxes.shape)}  (B, M, 4)")
-        #     print(f"mask_gt sum: {mask_gt.sum().item()}")
-        #     tuniq("gt_labels uniq", gt_labels.reshape(-1))
         
         batch_size = pd_scores.size(0)
         num_max_boxes = gt_bboxes.size(1)
@@ -989,10 +972,7 @@ class Assigner(torch.nn.Module):
         mask_in_gts = torch.cat((anc_points[None] - lt, rb - anc_points[None]), dim=2)
         mask_in_gts = mask_in_gts.reshape(shape[0], shape[1], num_anchors, -1).amin(3).gt_(self.eps)
 
-        
-        # with debug_block("in GT mask"):
-        #     print("mask_in_gts sum:", mask_in_gts.sum().item())
-        
+      
         na = pd_bboxes.shape[-2]
         gt_mask = (mask_in_gts * mask_gt).bool()  # b, max_num_obj, h*w
         overlaps = torch.zeros([batch_size, num_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
@@ -1082,13 +1062,6 @@ class Assigner(torch.nn.Module):
         pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
-
-        
-        # with debug_block("assigner outputs"):
-        #     tstats("fg_mask", fg_mask)
-        #     tstats("target_labels", target_labels)
-        #     tstats("norm_align_metric", norm_align_metric)
-        #     print("target_scores > 0:", (target_scores > 0).sum().item())
         
         return target_bboxes, target_scores, fg_mask.bool()
 
@@ -1136,12 +1109,6 @@ class BoxLoss(torch.nn.Module):
         self.dfl_ch = dfl_ch
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
-        # with debug_block("BoxLoss.forward / inputs"):
-        #     print("fg_mask sum:", fg_mask.sum().item())
-        #     tstats("target_scores sum per pos", torch.masked_select(target_scores.sum(-1), fg_mask))
-        #     tstats("pred_bboxes(pos)", pred_bboxes[fg_mask])
-        #     tstats("target_bboxes(pos)", target_bboxes[fg_mask])
-            
         # IoU loss
         weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)
         iou = compute_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask])
@@ -1212,34 +1179,21 @@ class ComputeLoss:
         self.assigner = Assigner(nc=self.nc, top_k=10, alpha=0.5, beta=6.0)
 
         self.project = torch.arange(m.ch, dtype=torch.float, device=device)
-
     def box_decode(self, anchor_points, pred_dist):
-        """
-        Decode predicted distribution to bounding boxes.
-        
-        Args:
-            anchor_points: (N, 2) anchor points
-            pred_dist: (B, N, 4*reg_max) predicted distribution
-            
-        Returns:
-            (B, N, 4) decoded bounding boxes in xyxy format
-        """
         b, a, c = pred_dist.shape
-        # Reshape to (B, N, 4, reg_max) for DFL processing
         pred_dist = pred_dist.reshape(b, a, 4, c // 4)
         pred_dist = pred_dist.softmax(3)
-        
-        # Use the project tensor for weighted sum (DFL)
-        pred_dist = pred_dist.matmul(self.project.to(pred_dist.device))
-        
-        # Split into left-top and right-bottom deltas
+    
+        # Ensure all tensors on the same device
+        device = pred_dist.device
+        anchor_points = anchor_points.to(device)
+        project = self.project.to(device).type(pred_dist.dtype)
+    
+        pred_dist = pred_dist.matmul(project)
         lt, rb = pred_dist.chunk(2, -1)
-        
-        # Convert to absolute coordinates
-        anchor_points = anchor_points.to(pred_dist.device)
-        x1y1 = anchor_points - lt  # top-left corner
-        x2y2 = anchor_points + rb  # bottom-right corner
-        
+        x1y1 = anchor_points - lt
+        x2y2 = anchor_points + rb
+    
         return torch.cat((x1y1, x2y2), dim=-1)
 
     def __call__(self, outputs, targets):
@@ -1543,34 +1497,42 @@ class Dataset(data.Dataset):
 
     @staticmethod
     def load_label(filenames):
-        """
-        FAST label loading without heavy PIL verification.
-        Major performance improvement by skipping image.verify()
-        """
         x = {}
         for filename in filenames:
             try:
-                # Skip PIL verification - major speedup!
-                # Only do basic path operations
+                # verify images
+                with open(filename, 'rb') as f:
+                    image = Image.open(f)
+                    image.verify()  # PIL verify
+                shape = image.size  # image size
+                assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} <10 pixels'
+                assert image.format.lower() in FORMATS, f'invalid image format {image.format}'
+
+                # verify labels
                 a = f'{os.sep}images{os.sep}'
                 b = f'{os.sep}labels{os.sep}'
                 label_path = b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt'
-                
-                if os.path.isfile(label_path):
-                    # Fast numpy loading instead of manual parsing
-                    try:
-                        label = numpy.loadtxt(label_path, dtype=numpy.float32, ndmin=2)
-                        # Basic validation only
-                        if label.size > 0 and label.shape[1] != 5:
-                            label = numpy.zeros((0, 5), dtype=numpy.float32)
-                    except (ValueError, OSError):
+                if os.path.isfile(b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt'):
+                    with open(label_path) as f:
+                        label = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                        label = numpy.array(label, dtype=numpy.float32)
+                    nl = len(label)
+                    if nl:
+                        assert (label >= 0).all()
+                        assert label.shape[1] == 5
+                        assert (label[:, 1:] <= 1).all()
+                        _, i = numpy.unique(label, axis=0, return_index=True)
+                        if len(i) < nl:  # duplicate row check
+                            label = label[i]  # remove duplicates
+                    else:
                         label = numpy.zeros((0, 5), dtype=numpy.float32)
                 else:
                     label = numpy.zeros((0, 5), dtype=numpy.float32)
-                    
-                x[filename] = label
-            except Exception:
-                x[filename] = numpy.zeros((0, 5), dtype=numpy.float32)
+            except FileNotFoundError:
+                label = numpy.zeros((0, 5), dtype=numpy.float32)
+            except AssertionError:
+                continue
+            x[filename] = label
         return x
 
 
@@ -1784,14 +1746,10 @@ params = {
 # %%
 train_dir = os.path.join(DATASET_PATH, "train", "images")
 
-# ✅ OPTIMIZED: Use pathlib for faster file operations
-from pathlib import Path
-train_path = Path(train_dir)
-filenames_train = [str(p) for p in train_path.glob('*.jpg')] + \
-                 [str(p) for p in train_path.glob('*.png')] + \
-                 [str(p) for p in train_path.glob('*.jpeg')]
-
-print(f"Found {len(filenames_train)} training images")
+filenames_train = []
+for filename in os.listdir(train_dir):
+    if filename.endswith(('.jpg', '.png', '.jpeg')):
+        filenames_train.append(os.path.join(train_dir, filename))
 
 input_size = 640
 
@@ -1803,45 +1761,20 @@ train_data = Dataset(
     augment=False   # False = không dùng augmentation
 )
 
-# DataLoader - OPTIMIZED for Windows with multiprocessing fix
-import multiprocessing as mp
-import sys
-
-# Fix for Windows multiprocessing
-if __name__ == '__main__' or 'ipykernel' in sys.modules:
-    # Set multiprocessing start method for better compatibility
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass  # Already set
-    
-    # Use multiple workers
-    train_num_workers = min(8, os.cpu_count() or 1)
-    val_num_workers = min(4, os.cpu_count() or 1)
-else:
-    # In module import context, use single-threaded
-    train_num_workers = 0
-    val_num_workers = 0
-
+# DataLoader
 train_loader = DataLoader(
     train_data,
     batch_size=32,
-    num_workers=train_num_workers,
+    num_workers=2,
     pin_memory=True,
-    persistent_workers=train_num_workers > 0,  # Only if using workers
-    prefetch_factor=4 if train_num_workers > 0 else None,
     collate_fn=Dataset.collate_fn
 )
 
 val_dir = os.path.join(DATASET_PATH, "valid", "images")
 
-# ✅ OPTIMIZED: Use pathlib for faster validation file listing
-val_path = Path(val_dir)
-filenames_val = [str(p) for p in val_path.glob('*.jpg')] + \
-               [str(p) for p in val_path.glob('*.png')] + \
-               [str(p) for p in val_path.glob('*.jpeg')]
-
-print(f"Found {len(filenames_val)} validation images")
+filenames_val = [os.path.join(val_dir, f) 
+                 for f in os.listdir(val_dir) 
+                 if f.endswith(('.jpg', '.png', '.jpeg'))]
 
 val_dataset = Dataset(
     filenames_val,
@@ -1853,10 +1786,8 @@ val_dataset = Dataset(
 val_loader = DataLoader(
     val_dataset,
     batch_size=8,      
-    num_workers=val_num_workers,  # Use the safe num_workers
+    num_workers=2,
     pin_memory=True,
-    persistent_workers=val_num_workers > 0,  # Only if using workers
-    prefetch_factor=2 if val_num_workers > 0 else None,
     collate_fn=Dataset.collate_fn
 )
 
@@ -1864,46 +1795,16 @@ val_loader = DataLoader(
 
 
 print(f"Train_loader : {len(train_loader)} batches")
+
 print(f"Val_loader: {len(val_loader)} batches")
 
 # %%
-# Test batch loading - wrapped in main guard for Windows compatibility
-if __name__ == '__main__' or 'ipykernel' in sys.modules:
-    print("\n[INFO] Testing batch loading...")
-    try:
-        batch = next(iter(train_loader))
-        print("All keys in batch      : ", batch[1].keys())
-        print(f"Input batch shape      : ", batch[0].shape)
-        print(f"Classification scores  : {batch[1]['cls'].shape}")
-        print(f"Box coordinates        : {batch[1]['box'].shape}")
-        print(f"Index identifier (which score belongs to which image): {batch[1]['idx'].shape}")
-        print("[SUCCESS] Batch loading test completed!")
-    except Exception as e:
-        print(f"[ERROR] Batch loading failed: {e}")
-        print("[FALLBACK] Setting num_workers=0 for compatibility")
-        
-        # Fallback to single-threaded mode
-        train_loader = DataLoader(
-            train_data,
-            batch_size=32,
-            num_workers=0,
-            pin_memory=False,
-            collate_fn=Dataset.collate_fn
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=8,
-            num_workers=0,
-            pin_memory=False,
-            collate_fn=Dataset.collate_fn
-        )
-        
-        # Test again
-        batch = next(iter(train_loader))
-        print("[SUCCESS] Batch loading with num_workers=0 completed!")
-else:
-    print("[INFO] Batch loading test skipped (module import mode)")
+batch=next(iter(train_loader))
+print("All keys in batch      : ", batch[1].keys())
+print(f"Input batch shape      : ", batch[0].shape)
+print(f"Classification scores  : {batch[1]['cls'].shape}")
+print(f"Box coordinates        : {batch[1]['box'].shape}")
+print(f"Index identifier (which score belongs to which image): {batch[1]['idx'].shape}")
 
 # %% [markdown]
 # # GPU FULL
@@ -2118,6 +2019,104 @@ def compute_ap_torch(tp, conf, pred_cls, target_cls, eps=1e-16):
 
     map50, mean_ap = ap50.mean().item(), ap_mean.mean().item()
     return tp_total.cpu().numpy(), fp_total.cpu().numpy(), p_mean.mean().item(), r_mean.mean().item(), map50, mean_ap
+
+
+# %%
+def compute_ap_cpu(tp, conf, pred_cls, target_cls, eps=1e-16):
+    """
+    Compute average precision (AP) on CPU tensors using numpy for interpolation.
+    
+    Args:
+        tp: torch.Tensor, (n_preds, n_iou_thresholds)
+        conf: torch.Tensor, (n_preds,)
+        pred_cls: torch.Tensor, (n_preds,)
+        target_cls: torch.Tensor, (n_targets,)
+        eps: float, small number to avoid div by zero
+    
+    Returns:
+        tp_total: np.array, true positives per class
+        fp_total: np.array, false positives per class
+        m_pre: float, mean precision
+        m_rec: float, mean recall
+        map50: float, mAP@0.5
+        mean_ap: float, mAP@0.5:0.95
+    """
+    # Move everything to CPU
+    tp = tp.cpu().numpy()
+    conf = conf.cpu().numpy()
+    pred_cls = pred_cls.cpu().numpy()
+    target_cls = target_cls.cpu().numpy()
+
+    # Sort by confidence
+    sort_idx = np.argsort(-conf)
+    tp = tp[sort_idx]
+    pred_cls = pred_cls[sort_idx]
+    conf = conf[sort_idx]
+
+    unique_classes, nt = np.unique(target_cls, return_counts=True)
+    nc = len(unique_classes)
+    n_iou = tp.shape[1]
+
+    ap = np.zeros((nc, n_iou), dtype=np.float32)
+    p = np.zeros((nc, 1000), dtype=np.float32)
+    r = np.zeros((nc, 1000), dtype=np.float32)
+    px = np.linspace(0, 1, 1000)
+
+    for ci, c in enumerate(unique_classes):
+        #mask = pred_cls == c
+        mask = (pred_cls.squeeze() == c)
+        nl = nt[ci]  # number of labels
+        no = mask.sum()  # number of predictions
+        if no == 0 or nl == 0:
+            continue
+        print("mask:",mask.shape)
+        tp_class = tp[mask, :]
+        if tp_class.shape[0] == 0:
+            continue
+        tpc = np.cumsum(tp[mask,:], axis=0)
+        fpc = np.cumsum(1 - tp[mask], axis=0)
+        recall = tpc / (nl + eps)
+        precision = tpc / (tpc + fpc)
+
+        conf_masked = conf[mask].ravel()        # flatten về 1D
+        recall_masked = recall[:, 0].ravel()
+        precision_masked = precision[:, 0].ravel()
+        # Interpolation for plotting (numpy)
+        # r[ci] = np.interp(-px, -conf_masked, recall_masked, left=0.0)
+        # p[ci] = np.interp(-px, -conf_masked, precision_masked, left=1.0)
+
+        
+        if len(conf_masked) == 0:  # không có pred cho class này
+            r[ci] = 0
+            p[ci] = 1
+        else:
+            r[ci] = np.interp(-px, -conf_masked, recall_masked, left=0.0)
+            p[ci] = np.interp(-px, -conf_masked, precision_masked, left=1.0)
+
+        # Compute AP for each IoU threshold
+        for j in range(n_iou):
+            m_rec = np.concatenate(([0.0], recall[:, j], [1.0]))
+            m_pre = np.concatenate(([1.0], precision[:, j], [0.0]))
+            # Precision envelope
+            m_pre = np.maximum.accumulate(m_pre[::-1])[::-1]
+            x = np.linspace(0, 1, 101)  # 101-point interpolation
+            ap[ci, j] = np.trapz(np.interp(x, m_rec, m_pre), x)
+
+    # F1 score
+    f1 = 2 * p * r / (p + r + eps)
+    i = f1.mean(0).argmax()  # max F1 index
+    p_mean = p[:, i]
+    r_mean = r[:, i]
+    tp_total = np.round(r_mean * nt)
+    fp_total = np.round(tp_total / (p_mean + eps) - tp_total)
+    ap50 = ap[:, 0]
+    ap_mean = ap.mean(1)
+    map50 = ap50.mean()
+    mean_ap = ap_mean.mean()
+    m_pre = p_mean.mean()
+    m_rec = r_mean.mean()
+
+    return tp_total, fp_total, m_pre, m_rec, map50, mean_ap
 
 # %%
 def compute_ap_cpu(tp, conf, pred_cls, target_cls, eps=1e-16):
